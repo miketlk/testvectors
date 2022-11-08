@@ -1,4 +1,5 @@
 import subprocess
+import psutil
 import signal
 import pytest
 import shutil
@@ -14,11 +15,13 @@ RPCPASSWORD = "secret"
 RPCPORT = 18998
 PORT = 18999
 ELEMETSD = os.environ.get("ELEMETSD_CMD", default="elemetsd")
-CMD = f"{ELEMETSD} -datadir={DATADIR} -chain=liquidregtest \
+CMD = f"{ELEMETSD} -daemon=1 -datadir={DATADIR} -chain=liquidregtest \
         -rpcuser={RPCUSER} -rpcpassword={RPCPASSWORD} -rpcport={RPCPORT} -port={PORT} \
         -fallbackfee=0.0000001 -validatepegin=0 -initialfreecoins=2100000000000000"
-
+PROCESS_NAME="elementsd"
 TEST_DATA_FILE = os.environ.get("TEST_DATA_FILE", default="test_data.json")
+WAIT_DEBUGGER = os.environ.get("WAIT_DEBUGGER", default="0")
+START_NODE = True if int(os.environ.get("START_NODE", default="1")) > 0 else False
 
 def get_coins(rpc):
     # create default wallet if doesn't exist
@@ -38,9 +41,28 @@ def get_coins(rpc):
     w.mine(1)
     assert w.getbalance().get("bitcoin", 0) > 0
 
-@pytest.fixture(scope="function", autouse=True)
-def erpc():
-    """Starts elementsd and gives back rpc instance to work with"""
+def check_node_running(pid = None) -> bool:
+    """Check if node is running."""
+
+    active_stats = [psutil.STATUS_RUNNING, psutil.STATUS_SLEEPING]
+
+    if pid is not None:
+        try:
+            return psutil.Process(pid).status() in active_stats
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return False
+
+    # Iterate over the all the running process
+    for proc in psutil.process_iter():
+        try:
+            # Check if process name contains the given name string.
+            if PROCESS_NAME.lower() in proc.name().lower():
+                return proc.status() in active_stats
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False
+
+def start_node() -> int:
     # create datadir for elements
     if os.path.isdir(DATADIR):
         shutil.rmtree(DATADIR)
@@ -49,28 +71,76 @@ def erpc():
     proc = subprocess.Popen(CMD,
                             stdout=subprocess.PIPE,
                             shell=True, preexec_fn=os.setsid)
-    time.sleep(2)
+
+    for i in range(100):
+        if check_node_running(proc.pid):
+            break
+        time.sleep(0.2)
+
+    if not check_node_running(proc.pid):
+        raise RuntimeError()
+
+    wait_time = int(WAIT_DEBUGGER)
+    if wait_time:
+        print(f"\nWaiting for debugger ({wait_time} sec)...")
+        time.sleep(wait_time)
+        print("Starting tests")
+
+    return proc.pid
+
+def stop_node(rpc, pid: int):
+    # Send the signal to all the process groups
+    for i in range(10):
+        try:
+            rpc.stop()
+        except:
+            pass
+        time.sleep(1)
+        if not check_node_running(pid):
+            break
+
+    if check_node_running(pid):
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        time.sleep(3)
+        if check_node_running(pid):
+            raise RuntimeError()
+
+    # cleanup
+    for i in range(100):
+        try:
+            shutil.rmtree(DATADIR)
+            time.sleep(1)
+            return
+        except Exception as e:
+            time.sleep(1)
+
+@pytest.fixture(scope="function", autouse=True)
+def erpc():
+    """Starts elementsd and gives back rpc instance to work with"""
+
+    daemon_pid = -1
+    if START_NODE:
+        daemon_pid = start_node()
+    else:
+        if not check_node_running():
+            print("Please start node first with following command line:")
+            print(CMD)
+            raise RuntimeError()
+
     try:
         rpc = BitcoinRPC(user=RPCUSER, password=RPCPASSWORD, port=RPCPORT)
         for i in range(100):
             try: # checking if elements is loaded already
                 rpc.getblockchaininfo()
+                break
             except:
                 time.sleep(0.2)
         get_coins(rpc)
         yield rpc
-        # stop elementsd
     finally:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # Send the signal to all the process groups
-        time.sleep(2)
-    # cleanup
-    for i in range(100):
-        try:
-            shutil.rmtree(DATADIR)
-            time.sleep(2)
-            return
-        except Exception as e:
-            time.sleep(1)
+        # stop elementsd
+        if START_NODE:
+            stop_node(rpc, daemon_pid)
 
 class TestDataCollector(object):
     """Collects test tata and dumps it to JSON file"""
