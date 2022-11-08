@@ -129,7 +129,13 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
         destination = w.getaddressinfo(destination)["unconfidential"]
     if not confidential_change:
         change = w.getaddressinfo(change)["unconfidential"]
-    psbt = w.walletcreatefundedpsbt([], [{destination: amount}], 0, {"includeWatching": True, "changeAddress": change, "fee_rate": 1}, True)
+    options = {
+        "includeWatching": True,
+        "changeAddress": change,
+        "fee_rate": 1,
+        "include_explicit": True
+    }
+    psbt = w.walletcreatefundedpsbt([], [{destination: amount}], 0, options, True)
     unblinded = psbt["psbt"]
     try:
         blinded = w.blindpsbt(unblinded)
@@ -308,8 +314,8 @@ def test_wsh(erpc, collector, mode):
     cosigner = COSIGNERS[0].derive(f"m/{derivation}").to_public()
     # change and receive descriptors
     descriptors = (
-        f"wsh(sortedmulti(1,[12345678/{derivation}]{cosigner},[{FGP}/{derivation}]{xprv}/0/*))",
-        f"wsh(sortedmulti(1,[12345678/{derivation}]{cosigner},[{FGP}/{derivation}]{xprv}/1/*))"
+        f"wsh(sortedmulti(1,[12345678/{derivation}]{cosigner}/0/*,[{FGP}/{derivation}]{xprv}/0/*))",
+        f"wsh(sortedmulti(1,[12345678/{derivation}]{cosigner}/1/*,[{FGP}/{derivation}]{xprv}/1/*))"
     )
     collector.define_suite(
         kind="valid",
@@ -333,8 +339,8 @@ def test_sh_wsh(erpc, collector, mode):
     cosigner = COSIGNERS[0].derive(f"m/{derivation}").to_public()
     # change and receive descriptors
     descriptors = (
-        f"sh(wsh(sortedmulti(1,[12345678/{derivation}]{cosigner},[{FGP}/{derivation}]{xprv}/0/*)))",
-        f"sh(wsh(sortedmulti(1,[12345678/{derivation}]{cosigner},[{FGP}/{derivation}]{xprv}/1/*)))"
+        f"sh(wsh(sortedmulti(1,[12345678/{derivation}]{cosigner}/0/*,[{FGP}/{derivation}]{xprv}/0/*)))",
+        f"sh(wsh(sortedmulti(1,[12345678/{derivation}]{cosigner}/1/*,[{FGP}/{derivation}]{xprv}/1/*)))"
     )
     collector.define_suite(
         kind="valid",
@@ -358,8 +364,8 @@ def test_sh(erpc, collector, mode):
     cosigner = COSIGNERS[0].derive(f"m/{derivation}").to_public()
     # change and receive descriptors
     descriptors = (
-        f"sh(sortedmulti(1,[12345678/{derivation}]{cosigner},[{FGP}/{derivation}]{xprv}/0/*))",
-        f"sh(sortedmulti(1,[12345678/{derivation}]{cosigner},[{FGP}/{derivation}]{xprv}/1/*))"
+        f"sh(sortedmulti(1,[12345678/{derivation}]{cosigner}/0/*,[{FGP}/{derivation}]{xprv}/0/*))",
+        f"sh(sortedmulti(1,[12345678/{derivation}]{cosigner}/1/*,[{FGP}/{derivation}]{xprv}/1/*))"
     )
     collector.skip_suite() # Legacy transactions are not currently supported
     bulk_check(erpc, descriptors, collector, mode)
