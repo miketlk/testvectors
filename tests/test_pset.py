@@ -106,12 +106,38 @@ def create_wallet(erpc, d1, d2, mbk=MBK):
         w.addr_type = "bech32"
     return w
 
-def fund_wallet(erpc, w, amount=1, confidential=True):
+def get_assetid(w):
+    """
+    Returns assetid of a non-bitcoin asset present in the wallet with maximal balance,
+    or None if there are no assets in the wallet
+    """
+    b = w.getbalance()
+    if "bitcoin" in b:
+        b.pop("bitcoin")
+    if not b: # no assets
+        return None
+    # convert to tuple (assetid, value) and sort by value desc
+    assets = sorted([(a, v) for a, v in b.items()], key=lambda x: -x[1])
+    # return assetid
+    return assets[0][0]
+
+def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0):
+    """
+    Sends `amount` to the wallet `w` and mines this transaction.
+    Set confidential=False to make unblinded transaction.
+    Set asset_amount if you also want to get a non-bitcoin asset.
+    """
     addr = w.getnewaddress("", w.addr_type)
     if not confidential:
         addr = w.getaddressinfo(addr)["unconfidential"]
     wdefault = erpc.wallet()
-    wdefault.sendtoaddress(addr, amount)
+    # send asset
+    if asset_amount > 0:
+        assetid = get_assetid(wdefault)
+        wdefault.sendtoaddress(addr, asset_amount, "", "", False, False, 6, "unset", False, assetid)
+    # send bitcoin
+    if amount > 0:
+        wdefault.sendtoaddress(addr, amount)
     wdefault.mine(1)
 
 def inject_sighash(psbt, sighash):
@@ -120,7 +146,7 @@ def inject_sighash(psbt, sighash):
         inp.sighash_type = sighash
     return str(psbt)
 
-def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None):
+def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None, asset=None):
     wdefault = erpc.wallet()
     if not destination:
         destination = wdefault.getnewaddress()
@@ -129,13 +155,21 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
         destination = w.getaddressinfo(destination)["unconfidential"]
     if not confidential_change:
         change = w.getaddressinfo(change)["unconfidential"]
+    outputs = [{destination: amount}]
     options = {
         "includeWatching": True,
         "changeAddress": change,
         "fee_rate": 1,
         "include_explicit": True
     }
-    psbt = w.walletcreatefundedpsbt([], [{destination: amount}], 0, options, True)
+    if asset is not None:
+        outputs[0]["asset"] = asset
+        # if we are sending non-btc asset we need two change addresses - for btc and for asset,
+        # and AFAIK there is no way to provide that to the RPC,
+        # so here we will always have confidential change unless we patch psbt afterwards
+        options.pop("changeAddress")
+        options["change_type"] = w.addr_type
+    psbt = w.walletcreatefundedpsbt([], outputs, 0, options, True)
     unblinded = psbt["psbt"]
     try:
         blinded = w.blindpsbt(unblinded)
@@ -202,9 +236,30 @@ def get_signatures(signed_pset: str) -> dict:
 
     return sigs
 
+def get_asset_name(asset: str) -> str:
+    return "Bitcoin" if asset is None else "'" + asset[:8] + "...'"
+
 def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
     w = create_wallet(erpc, *descriptors)
-    fund_wallet(erpc, w, 10, confidential=True)
+    fund_wallet(erpc, w, 10, confidential=True, asset_amount=10)
+
+    if mode in ['asset', 'all']:
+        # iterate over assets: [some random asset, bitcoin]
+        assets = [get_assetid(w), None] # None for bitcoin (default asset)
+        for asset in assets:
+            unblinded, blinded = create_psbt(erpc, w, asset=asset)
+            # blinding may fail if all inputs and outputs are confidential, so fund_wallet will return None in blinded
+            unsigned = blinded or unblinded
+            signed = sign_psbt(w, unsigned)
+            check_psbt(erpc, unsigned, signed)
+            sh = sighash_from_signed_pset(signed)
+            collector.add_test(
+                pset=unsigned,
+                signatures=get_signatures(signed),
+                sighash=sh,
+                description=f"Confidential: both, sighash: {sighash_to_str(sh)}, asset: {get_asset_name(asset)}"
+            )
+
     if mode in ['sighashes', 'all']:
         for sh in ALL_SIGHASHES:
             unblinded, blinded = create_psbt(erpc, w, sighash=sh)
@@ -251,7 +306,7 @@ def derivation_quote(path: str) -> str:
 ##########################
 
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
 def test_wpkh(erpc, collector, mode):
     derivation = "84h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
@@ -272,7 +327,7 @@ def test_wpkh(erpc, collector, mode):
     )
     bulk_check(erpc, descriptors, collector, mode)
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
 def test_sh_wpkh(erpc, collector, mode):
     derivation = "49h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
@@ -292,7 +347,7 @@ def test_sh_wpkh(erpc, collector, mode):
     )
     bulk_check(erpc, descriptors, collector, mode)
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
 def test_pkh(erpc, collector, mode):
     derivation = "44h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
@@ -305,7 +360,7 @@ def test_pkh(erpc, collector, mode):
     collector.skip_suite() # Legacy transactions are not currently supported
     bulk_check(erpc, descriptors, collector, mode)
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
 def test_wsh(erpc, collector, mode):
     # 1-of-2 multisig
     derivation = "48h/1h/0h/2h"
@@ -330,7 +385,7 @@ def test_wsh(erpc, collector, mode):
     )
     bulk_check(erpc, descriptors, collector, mode)
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
 def test_sh_wsh(erpc, collector, mode):
     # 1-of-2 multisig
     derivation = "48h/1h/0h/1h"
@@ -355,7 +410,7 @@ def test_sh_wsh(erpc, collector, mode):
     )
     bulk_check(erpc, descriptors, collector, mode)
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
 def test_sh(erpc, collector, mode):
     # 1-of-2 multisig
     derivation = "45h"
