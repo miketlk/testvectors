@@ -1,5 +1,5 @@
 from typing import OrderedDict
-from embit import bip32, bip39
+from embit import bip32, bip39, compact
 from embit.liquid.networks import get_network
 from embit.liquid import slip77
 from embit.descriptor.checksum import add_checksum
@@ -9,6 +9,13 @@ from embit.liquid.finalizer import finalize_psbt
 from embit.liquid.transaction import LSIGHASH as SIGHASH
 import random
 import pytest
+import hashlib
+import json
+import requests
+import math
+
+# PSET key for asset metadata
+PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA = b'\xfc\x04pset\xfd\x00\x01'
 
 # liquid regtest can have any name except main, test, regtest, liquidv1 and liquidtestnet
 NET = get_network("liquidregtest")
@@ -19,6 +26,9 @@ ROOTKEY = bip32.HDKey.from_seed(SEED, version=NET["xprv"])
 FGP = ROOTKEY.my_fingerprint.hex() # fingerprint for derivation
 MBK = slip77.master_blinding_from_seed(SEED) # master blinding key
 MBK_WIF = MBK.wif()
+CONTRACT_VERSION = 0
+ISSUE_FEE = 1000e-8
+ISSUE_FEE_RATE = 0.1
 
 # some random cosigner xpubs
 SEEDS = [bytes([i]*32) for i in range(1,5)]
@@ -146,6 +156,67 @@ def inject_sighash(psbt, sighash):
         inp.sighash_type = sighash
     return str(psbt)
 
+def issue(erpc, w, ticker, name, asset_amount, domain, precision=0, token_amount=0, asset_address=None, token_address=None, pubkey=None, collection="", blind=True):
+    asset_address = asset_address or w.getnewaddress()
+    # TODO: pubkey should be from utxo instead
+    pubkey = pubkey or w.getaddressinfo(asset_address).get("pubkey") or w.getaddressinfo(w.getnewaddress())["pubkey"]
+    token_address = token_address or w.getnewaddress()
+    if not collection:
+        contract=f'{{"entity":{{"domain":"{domain}"}},"issuer_pubkey":"{pubkey}","name":"{name}","precision":{precision},"ticker":"{ticker}","version":{CONTRACT_VERSION}}}'
+    else:
+        contract=f'{{"collection":"{collection}","entity":{{"domain":"{domain}"}},"issuer_pubkey":"{pubkey}","name":"{name}","precision":{precision},"ticker":"{ticker}","version":{CONTRACT_VERSION}}}'
+    contract_hash = hashlib.sha256(contract.encode()).digest()
+
+    LBTC = w.dumpassetlabels()["bitcoin"]
+    # unspent LBTC outputs
+    utxos = [utxo for utxo in w.listunspent(1, 9999999, [], True, {"asset": LBTC})]
+    if not utxos:
+        raise RuntimeError(f"Not enough funds. Send some LBTC to {w.getnewaddress()}.")
+
+    utxos.sort(key=lambda utxo: -utxo["amount"])
+    utxo = utxos[0]
+    fee = ISSUE_FEE
+    # run twice - with base fee and then with real fee
+    for _ in range(2):
+        rawtx = w.createrawtransaction(
+            [{"txid": utxo["txid"], "vout": utxo["vout"]}],
+            [{ w.getrawchangeaddress(): round(utxo["amount"]-fee, 8)}, {"fee": fee}]
+        )
+        issueconf = {
+            "asset_amount": asset_amount,
+            "asset_address": asset_address,
+            "blind": blind,
+            "contract_hash": contract_hash[::-1].hex(),
+        }
+        if token_amount != 0:
+            issueconf.update({
+                "token_amount": token_amount,
+                "token_address": token_address,
+            })
+
+        rawissue = w.rawissueasset(rawtx, [issueconf])[0]
+        hextx = rawissue.pop("hex")
+        blinded = w.blindrawtransaction(hextx, False, [], blind)
+        finalized = w.signrawtransactionwithwallet(blinded)["hex"]
+        mempooltest = w.testmempoolaccept([finalized])[0]
+        if not mempooltest["allowed"]:
+            raise RuntimeError(f"Tx can't be broadcasted: {mempooltest['reject-reason']}")
+        vsize = mempooltest["vsize"]
+        fee = round(math.ceil(vsize*ISSUE_FEE_RATE)*1e-8, 8)
+
+    erpc.sendrawtransaction(finalized)
+    w.mine(1)
+    assetid = rawissue["asset"]
+    assert assetid in w.getbalance()
+
+    asset = {
+        'tag': assetid,
+        'contract': contract,
+        'prevout_txid': utxo["txid"],
+        'prevout_index': utxo["vout"]
+    }
+    return asset
+
 def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None, asset=None):
     wdefault = erpc.wallet()
     if not destination:
@@ -236,12 +307,82 @@ def get_signatures(signed_pset: str) -> dict:
 
     return sigs
 
-def get_asset_name(asset: str) -> str:
+def get_asset_name(asset: str, metadata_list: list = []) -> str:
+    for meta in metadata_list:
+        if meta['tag'] == asset:
+            contract_obj = json.loads(meta['contract'])
+            return "'" + contract_obj['name'] + "' (" + asset[:8] + "...)"
+
     return "Bitcoin" if asset is None else "'" + asset[:8] + "...'"
+
+def add_asset_metadata(pset_str: str, metadata_list: list) -> str:
+    pset = PSET.from_string(pset_str)
+
+    for meta in metadata_list:
+        coded_meta = (
+            compact.to_bytes(len(meta['contract'])) +
+            meta['contract'].encode() +
+            bytes.fromhex(meta['prevout_txid']) +
+            int(meta['prevout_index']).to_bytes(4,'little')
+        )
+        key = PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA + bytes.fromhex(meta['tag'])[::-1]
+        pset.unknown[key] = coded_meta
+
+    return pset.to_string()
+
+def issue_test_assets(erpc, w) -> list:
+    return [
+        issue(
+            erpc,
+            w,
+            ticker="TEST",
+            name="Testcoin",
+            domain="example.com",
+            asset_amount=1.234,
+            precision=2,
+            asset_address=w.getnewaddress("", w.addr_type),
+            blind=False
+        ),
+        issue(
+            erpc,
+            w,
+            ticker="TEST2",
+            name="Testcoin2",
+            domain="example.com",
+            asset_amount=2.345,
+            precision=4,
+            asset_address=w.getnewaddress("", w.addr_type),
+            blind=False
+        ),
+    ]
 
 def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
     w = create_wallet(erpc, *descriptors)
     fund_wallet(erpc, w, 10, confidential=True, asset_amount=10)
+
+    if mode in ['asset_metadata', 'all']:
+        # issue our test assets and obtain metadata
+        issued_list = issue_test_assets(erpc, w)
+        issued_dict = { a['tag'] : a for a in issued_list }
+        # iterate over issued assets
+        assets = [a['tag'] for a in issued_list]
+        for asset in assets:
+            unblinded, blinded = create_psbt(erpc, w, asset=asset)
+            # blinding may fail if all inputs and outputs are confidential, so fund_wallet will return None in blinded
+            unsigned = blinded or unblinded
+            if asset in issued_dict:
+                unsigned = add_asset_metadata(unsigned, issued_list)
+                pass
+            signed = sign_psbt(w, unsigned)
+            check_psbt(erpc, unsigned, signed)
+            sh = sighash_from_signed_pset(signed)
+            collector.add_test(
+                pset=unsigned,
+                signatures=get_signatures(signed),
+                sighash=sh,
+                description=f"Confidential: both, sighash: {sighash_to_str(sh)}, asset: {get_asset_name(asset, issued_list)}",
+                asset_contract=issued_dict[asset]['contract'] if asset in issued_dict else None
+            )
 
     if mode in ['asset', 'all']:
         # iterate over assets: [some random asset, bitcoin]
@@ -306,7 +447,7 @@ def derivation_quote(path: str) -> str:
 ##########################
 
 
-@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
+@pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset', 'asset_metadata'])
 def test_wpkh(erpc, collector, mode):
     derivation = "84h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")

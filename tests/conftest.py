@@ -193,7 +193,8 @@ class TestDataCollector(object):
         pset: str,
         signatures: dict,
         sighash: int = None,
-        description: str = ""
+        description: str = "",
+        asset_contract: str = "",
     ) -> None:
         if self.skip:
             return
@@ -202,8 +203,11 @@ class TestDataCollector(object):
             "description": description,
             "pset": pset,
             "signatures": signatures,
-            "sighash": sighash
+            "sighash": sighash,
         })
+
+        if asset_contract:
+            test["asset_contract"] = asset_contract
 
         try:
             self.data[self.kind][self.suite]["tests"].append(test)
