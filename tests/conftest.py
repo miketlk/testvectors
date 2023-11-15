@@ -23,6 +23,44 @@ TEST_DATA_FILE = os.environ.get("TEST_DATA_FILE", default="test_data.json")
 WAIT_DEBUGGER = os.environ.get("WAIT_DEBUGGER", default="0")
 START_NODE = True if int(os.environ.get("START_NODE", default="1")) > 0 else False
 
+
+def pytest_configure(config):
+    # register your new marker to avoid warnings
+    config.addinivalue_line(
+        "markers",
+        "target: specify a test target"
+    )
+
+
+def pytest_addoption(parser):
+    # add your new filter option (you can name it whatever you want)
+    parser.addoption('--target', action='store')
+
+
+def pytest_collection_modifyitems(config, items):
+    # check if you got an option like --target=test-001
+    filter = config.getoption("--target")
+
+    new_items = []
+    for item in items:
+        mark = item.get_closest_marker("target")
+        if filter:
+            if mark and mark.args and mark.args[0] == filter:
+                # collect all items that have a target marker with that value
+                new_items.append(item)
+        else:
+            if not mark:
+                # collect all items that have no target marker
+                new_items.append(item)
+    items[:] = new_items
+
+    if filter:
+        pass
+        path_file = os.path.split(TEST_DATA_FILE)
+        target_file = os.path.join(path_file[0], filter + ".json")
+        os.environ["TEST_DATA_FILE_TARGET"] = target_file
+
+
 def get_coins(rpc):
     # create default wallet if doesn't exist
     if "" not in rpc.listwallets():
@@ -192,9 +230,13 @@ class TestDataCollector(object):
         self,
         pset: str,
         signatures: dict,
-        sighash: int = None,
-        description: str = "",
+        sighash: int,
+        description: str,
+        destination_address: str,
+        amount: str,
+        fee: str,
         asset_contract: str = "",
+        asset_tag: str = "",
     ) -> None:
         if self.skip:
             return
@@ -204,10 +246,16 @@ class TestDataCollector(object):
             "pset": pset,
             "signatures": signatures,
             "sighash": sighash,
+            "destination_address": destination_address,
+            "amount": amount,
+            "fee": fee
         })
 
         if asset_contract:
             test["asset_contract"] = asset_contract
+
+        if asset_tag:
+            test["asset_tag"] = asset_tag
 
         try:
             self.data[self.kind][self.suite]["tests"].append(test)
@@ -226,6 +274,8 @@ class TestDataCollector(object):
 def collector():
     """Creates and provides test data collector"""
 
-    collector_obj = TestDataCollector(TEST_DATA_FILE)
+    out_file = os.environ.get("TEST_DATA_FILE_TARGET", default=TEST_DATA_FILE)
+
+    collector_obj = TestDataCollector(out_file)
     yield collector_obj
     collector_obj.dump()
