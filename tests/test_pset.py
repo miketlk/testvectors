@@ -25,7 +25,7 @@ SEED = bip39.mnemonic_to_seed(MNEMONIC)
 ROOTKEY = bip32.HDKey.from_seed(SEED, version=NET["xprv"])
 FGP = ROOTKEY.my_fingerprint.hex() # fingerprint for derivation
 MBK = slip77.master_blinding_from_seed(SEED) # master blinding key
-MBK_WIF = MBK.wif()
+MBK_SLIP77 = f"slip77({MBK.secret.hex()})" # MBK formatted according to ELIP 150
 CONTRACT_VERSION = 0
 ISSUE_FEE = 1000e-8
 ISSUE_FEE_RATE = 0.1
@@ -499,7 +499,7 @@ def test_wpkh(erpc, collector, mode, description="Single signature P2WPKH"):
     collector.define_suite(
         kind="valid",
         name="wpkh",
-        mbk=MBK_WIF,
+        mbk=MBK_SLIP77,
         policy_map="wpkh(@0)",
         keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**"],
         description=description
@@ -519,7 +519,7 @@ def test_sh_wpkh(erpc, collector, mode):
     collector.define_suite(
         kind="valid",
         name="sh_wpkh",
-        mbk=MBK_WIF,
+        mbk=MBK_SLIP77,
         policy_map="sh(wpkh(@0))",
         keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**"],
         description="Single signature P2SH-P2WPKH"
@@ -554,7 +554,7 @@ def test_wsh(erpc, collector, mode):
     collector.define_suite(
         kind="valid",
         name="wsh_sortedmulti",
-        mbk=MBK_WIF,
+        mbk=MBK_SLIP77,
         policy_map="wsh(sortedmulti(1,@0,@1))",
         keys_info=[
             f"[12345678/{derivation_quote(derivation)}]{cosigner}/**",
@@ -579,7 +579,7 @@ def test_sh_wsh(erpc, collector, mode):
     collector.define_suite(
         kind="valid",
         name="sh_wsh_sortedmulti",
-        mbk=MBK_WIF,
+        mbk=MBK_SLIP77,
         policy_map="sh(wsh(sortedmulti(1,@0,@1)))",
         keys_info=[
             f"[12345678/{derivation_quote(derivation)}]{cosigner}/**",
