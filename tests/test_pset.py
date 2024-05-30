@@ -138,9 +138,14 @@ def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0):
     Set confidential=False to make unblinded transaction.
     Set asset_amount if you also want to get a non-bitcoin asset.
     """
-    addr = w.getnewaddress("", w.addr_type)
+    addr_type = w.addr_type
+    if confidential and addr_type in ["bech32", "bech32m"]:
+        addr_type = "blech32"
+
+    addr = w.getnewaddress("", addr_type)
     if not confidential:
         addr = w.getaddressinfo(addr)["unconfidential"]
+
     wdefault = erpc.wallet()
     # send asset
     if asset_amount > 0:
