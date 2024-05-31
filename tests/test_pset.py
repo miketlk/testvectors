@@ -85,10 +85,10 @@ def random_wallet_name():
 
 def create_wallet(erpc, d1, d2, mbk=MBK):
     wname = random_wallet_name()
-    # to derive addresses
+    # To derive addresses
     desc1 = Descriptor.from_string(d1)
     desc2 = Descriptor.from_string(d2)
-    # to add checksums
+    # To add checksums
     d1 = add_checksum(str(d1))
     d2 = add_checksum(str(d2))
     erpc.createwallet(wname, False, True, "", False, True, False)
@@ -108,7 +108,7 @@ def create_wallet(erpc, d1, d2, mbk=MBK):
         }])
     assert all([k["success"] for k in res])
     w.importmasterblindingkey(mbk.secret.hex())
-    # detect addr type as Bitcoin Core is stupid
+    # Detect address type
     if desc1.is_wrapped:
         w.addr_type = "p2sh-segwit"
     elif desc1.is_legacy:
@@ -138,13 +138,9 @@ def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0):
     Set confidential=False to make unblinded transaction.
     Set asset_amount if you also want to get a non-bitcoin asset.
     """
-    addr_type = w.addr_type
-    if confidential and addr_type in ["bech32", "bech32m"]:
-        addr_type = "blech32"
 
-    addr = w.getnewaddress("", addr_type)
-    if not confidential:
-        addr = w.getaddressinfo(addr)["unconfidential"]
+    addr_info = w.getaddressinfo(w.getnewaddress("", w.addr_type))
+    addr = addr_info["confidential" if confidential else "unconfidential"]
 
     wdefault = erpc.wallet()
     # send asset
@@ -234,15 +230,10 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
         destination = wdefault.getnewaddress()
     change = w.getrawchangeaddress(w.addr_type)
 
-    destination_info = OrderedDict({
-        "confidential": destination,
-        "unconfidential": w.getaddressinfo(destination)["unconfidential"],
-    })
+    destination_info = w.getaddressinfo(destination)
+    destination = destination_info["confidential" if confidential else "unconfidential"]
+    change = w.getaddressinfo(change)["confidential" if confidential_change else "unconfidential"]
 
-    if not confidential:
-        destination = w.getaddressinfo(destination)["unconfidential"]
-    if not confidential_change:
-        change = w.getaddressinfo(change)["unconfidential"]
     outputs = [{destination: amount}]
     options = {
         "includeWatching": True,
@@ -273,7 +264,10 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
             blinded = inject_sighash(blinded, sighash)
     return (
         unblinded, blinded, OrderedDict({
-            "destination_address": destination_info,
+            "destination_address": OrderedDict({
+                "confidential": destination_info["confidential"],
+                "unconfidential": destination_info["unconfidential"]
+            }),
             "amount": int(10**ELEMENTS_RPC_PRECISION * amount + 0.1),
             "fee": int(10**ELEMENTS_RPC_PRECISION * psbt["fee"] + 0.1)
         })
