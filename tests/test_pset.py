@@ -273,9 +273,12 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
         options.pop("changeAddress")
         options["change_type"] = w.addr_type
     psbt = w.walletcreatefundedpsbt([], outputs, 0, options, True)
+    debug_dump_json("walletcreatefundedpsbt_out.json", psbt)
     unblinded = psbt["psbt"]
     try:
-        blinded = w.walletprocesspsbt(unblinded, False)['psbt']
+        walletprocesspsbt_out = w.walletprocesspsbt(unblinded, False)
+        blinded = walletprocesspsbt_out['psbt']
+        debug_dump_json("walletprocesspsbt_out.json", walletprocesspsbt_out)
     except:
         blinded = None
     # inject sighash for all inputs
@@ -647,3 +650,24 @@ def test_wpkh_asset_metadata(enode, collector, mode):
 @pytest.mark.parametrize("mode", ['asset_metadata_no_ticker'])
 def test_wpkh_asset_metadata_no_ticker(enode, collector, mode):
     test_wpkh(enode, collector, mode, description="Asset metatada, no ticker: single signature P2WPKH")
+
+# Execute only if started as 'pytest --target=issue_unexpected_op_return_output'
+@pytest.mark.target("issue_unexpected_op_return_output")
+def test_issue_unexpected_op_return_output(enode):
+    derivation = "84h/1h/0h"
+    xprv = ROOTKEY.derive(f"m/{derivation}")
+    # change and receive descriptors
+    descriptors = (
+        f"wpkh([{FGP}/{derivation}]{xprv}/0/*)",
+        f"wpkh([{FGP}/{derivation}]{xprv}/1/*)"
+    )
+
+    w = create_wallet(enode.rpc, *descriptors)
+    fund_wallet(enode.rpc, w, 10, confidential=True)
+
+    unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, amount=0.1234, confidential=False, confidential_change=False)
+    unsigned = blinded or unblinded
+
+    debug_dump("pset.base64", unsigned)
+    debug_dump_json("pset_decoded.json", enode.rpc.decodepsbt(unsigned))
+    debug_dump_json("wallet_info.json", w.getwalletinfo())
