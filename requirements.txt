@@ -1,0 +1,4 @@
+embit
+pytest
+psutil
+requests

@@ -19,3 +19,9 @@ test_data.json
 unknown_asset.json
 asset_metadata.json
 asset_metadata_no_ticker.json
+issue_unexpected_op_return_output.json
+pset_decoded.json
+wallet_info.json
+walletcreatefundedpsbt_out.json
+walletprocesspsbt_out.json
+pset.base64
