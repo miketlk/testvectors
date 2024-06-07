@@ -13,6 +13,7 @@ import hashlib
 import json
 import requests
 import math
+from test_debug import *
 
 # PSET key for asset metadata
 PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA = b'\xfc\x08pset_hww\x00'
@@ -107,7 +108,8 @@ def create_wallet(erpc, d1, d2, mbk=MBK):
             "range": 20,
         }])
     assert all([k["success"] for k in res])
-    w.importmasterblindingkey(mbk.secret.hex())
+    if mbk:
+        w.importmasterblindingkey(mbk.secret.hex())
     # Detect address type
     if desc1.is_wrapped:
         w.addr_type = "p2sh-segwit"
@@ -132,7 +134,7 @@ def get_assetid(w):
     # return assetid
     return assets[0][0]
 
-def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0):
+def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0, source=None):
     """
     Sends `amount` to the wallet `w` and mines this transaction.
     Set confidential=False to make unblinded transaction.
@@ -142,15 +144,35 @@ def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0):
     addr_info = w.getaddressinfo(w.getnewaddress("", w.addr_type))
     addr = addr_info["confidential" if confidential else "unconfidential"]
 
-    wdefault = erpc.wallet()
+    debug_print(f"fund_wallet(confidential={confidential})\n  recipient: {addr}")
+
+    if source is None:
+        source = erpc.wallet()
+
     # send asset
     if asset_amount > 0:
-        assetid = get_assetid(wdefault)
-        wdefault.sendtoaddress(addr, asset_amount, "", "", False, False, 6, "unset", False, assetid)
+        assetid = get_assetid(source)
+        source.sendtoaddress(addr, asset_amount, "", "", False, False, 6, "unset", False, assetid)
     # send bitcoin
     if amount > 0:
-        wdefault.sendtoaddress(addr, amount)
-    wdefault.mine(1)
+        source.sendtoaddress(addr, amount)
+    source.mine(1)
+
+def fund_wallet_with_free_coins(w, amount=1, confidential=True):
+    """
+    Funds walled with freely available coins and mines this transaction.
+    Set confidential=False to make unblinded transaction.
+    """
+
+    w.rescanblockchain()
+    addr_info = w.getaddressinfo(w.getnewaddress())
+    addr = addr_info["confidential" if confidential else "unconfidential"]
+
+    debug_print(f"fund_wallet_with_free_coins(confidential={confidential})\n  recipient: {addr}")
+
+    w.sendtoaddress(addr, amount)
+    w.mine(1)
+    assert w.getbalance().get("bitcoin", 0) >= amount
 
 def inject_sighash(psbt, sighash):
     psbt = PSET.from_string(psbt)
@@ -225,14 +247,16 @@ def issue(erpc, w, name, asset_amount, domain, ticker=None, precision=0, token_a
     return asset
 
 def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None, asset=None):
-    wdefault = erpc.wallet()
     if not destination:
+        wdefault = erpc.wallet()
         destination = wdefault.getnewaddress()
     change = w.getrawchangeaddress(w.addr_type)
 
     destination_info = w.getaddressinfo(destination)
     destination = destination_info["confidential" if confidential else "unconfidential"]
     change = w.getaddressinfo(change)["confidential" if confidential_change else "unconfidential"]
+
+    debug_print(f"create_psbt(confidential={confidential}, confidential_change={confidential_change}):\n  recipient: {destination}\n  change:    {change}")
 
     outputs = [{destination: amount}]
     options = {
@@ -251,12 +275,9 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
     psbt = w.walletcreatefundedpsbt([], outputs, 0, options, True)
     unblinded = psbt["psbt"]
     try:
-        blinded = w.blindpsbt(unblinded)
+        blinded = w.walletprocesspsbt(unblinded, False)['psbt']
     except:
-        try:
-            blinded = w.walletprocesspsbt(unblinded, False)['psbt']
-        except:
-            blinded = None
+        blinded = None
     # inject sighash for all inputs
     if sighash is not None:
         unblinded = inject_sighash(unblinded, sighash)
@@ -373,15 +394,15 @@ def issue_test_assets(erpc, w) -> list:
         ),
     ]
 
-def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
-    w = create_wallet(erpc, *descriptors)
-    fund_wallet(erpc, w, 10, confidential=True, asset_amount=10)
+def bulk_check(enode, descriptors, collector, mode: str = 'all'):
+    w = create_wallet(enode.rpc, *descriptors)
+    fund_wallet(enode.rpc, w, 10, confidential=True, asset_amount=10)
 
     if mode in ['asset_metadata', 'asset_metadata_no_ticker', 'all']:
         # issue our test assets and obtain metadata
         if mode == 'asset_metadata_no_ticker':
             issued_list = [issue(
-                erpc,
+                enode.rpc,
                 w,
                 name="Testcoin no ticker",
                 domain="example.com",
@@ -391,19 +412,18 @@ def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
                 blind=False
             )]
         else:
-            issued_list = issue_test_assets(erpc, w)
+            issued_list = issue_test_assets(enode.rpc, w)
         issued_dict = { a['tag'] : a for a in issued_list }
         # iterate over issued assets
         assets = [a['tag'] for a in issued_list]
         for asset in assets:
-            unblinded, blinded, tx_prop = create_psbt(erpc, w, amount=0.12345678, asset=asset)
-            # blinding may fail if all inputs and outputs are confidential, so fund_wallet will return None in blinded
+            unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, amount=0.12345678, asset=asset)
             unsigned = blinded or unblinded
             if asset in issued_dict:
                 unsigned = add_asset_metadata(unsigned, issued_list)
                 pass
             signed = sign_psbt(w, unsigned)
-            check_psbt(erpc, unsigned, signed)
+            check_psbt(enode.rpc, unsigned, signed)
             sh = sighash_from_signed_pset(signed)
             collector.add_test(
                 pset=unsigned,
@@ -421,11 +441,10 @@ def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
         assets = [get_assetid(w)] if mode == 'unknown_asset' else [get_assetid(w), None]
 
         for asset in assets:
-            unblinded, blinded, tx_prop = create_psbt(erpc, w, amount=0.12345678, asset=asset)
-            # blinding may fail if all inputs and outputs are confidential, so fund_wallet will return None in blinded
+            unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, amount=0.12345678, asset=asset)
             unsigned = blinded or unblinded
             signed = sign_psbt(w, unsigned)
-            check_psbt(erpc, unsigned, signed)
+            check_psbt(enode.rpc, unsigned, signed)
             sh = sighash_from_signed_pset(signed)
             collector.add_test(
                 pset=unsigned,
@@ -438,11 +457,10 @@ def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
 
     if mode in ['sighashes', 'all']:
         for sh in ALL_SIGHASHES:
-            unblinded, blinded, tx_prop = create_psbt(erpc, w, sighash=sh)
-            # blinding may fail if all inputs and outputs are confidential, so fund_wallet will return None in blinded
+            unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, sighash=sh)
             unsigned = blinded or unblinded
             signed = sign_psbt(w, unsigned, sighash=sh)
-            check_psbt(erpc, unsigned, signed, sighash=sh)
+            check_psbt(enode.rpc, unsigned, signed, sighash=sh)
             collector.add_test(
                 pset=unsigned,
                 signatures=get_signatures(signed),
@@ -459,24 +477,32 @@ def bulk_check(erpc, descriptors, collector, mode: str = 'all'):
         (True, True): "both"
     }
     if mode in ['blinded_unblinded', 'all']:
-        for conf_input in [True, False]:
-            w = create_wallet(erpc, *descriptors)
-            fund_wallet(erpc, w, 10, confidential=conf_input)
-            for conf_destination in [True, False]:
-                unblinded, blinded, tx_prop = create_psbt(erpc, w, confidential=conf_destination)
-                # blinding may fail if all inputs and outputs are confidential, so fund_wallet will return None in blinded
+        for conf_input in [False,True]:
+            # To make sure all UTXOs are unconfidential or confidential we need to start with a clean blockchain
+            enode.restart()
+            w = create_wallet(enode.rpc, *descriptors)
+            fund_wallet(enode.rpc, w, 10, confidential=conf_input)
+            for conf_destination in [False,True]:
+                debug_print(f"\n === Confidential : {conf_status[(conf_input, conf_destination)]} ===")
+                unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, amount=0.1234, confidential=conf_destination, confidential_change=conf_destination)
                 unsigned = blinded or unblinded
                 signed = sign_psbt(w, unsigned)
-                check_psbt(erpc, unsigned, signed)
+                check_psbt(enode.rpc, unsigned, signed)
                 sh = sighash_from_signed_pset(signed)
                 collector.add_test(
                     pset=unsigned,
                     signatures=get_signatures(signed),
                     sighash=sh,
                     description=(f"Confidential: {conf_status[(conf_input, conf_destination)]}, "
-                                f"sighash: {sighash_to_str(sh)}"),
+                                 f"sighash: {sighash_to_str(sh)}"),
                     **tx_prop
                 )
+                if TEST_DEBUG:
+                    debug_dump_json(
+                        "conf_" + conf_status[(conf_input, conf_destination)] + ".json",
+                        enode.rpc.decodepsbt(unsigned),
+                        True
+                    )
 
 def derivation_quote(path: str) -> str:
     return path.replace("h", "'")
@@ -485,7 +511,7 @@ def derivation_quote(path: str) -> str:
 
 
 @pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset', 'asset_metadata'])
-def test_wpkh(erpc, collector, mode, description="Single signature P2WPKH"):
+def test_wpkh(enode, collector, mode, description="Single signature P2WPKH"):
     derivation = "84h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
     xpub = xprv.to_public()
@@ -503,10 +529,10 @@ def test_wpkh(erpc, collector, mode, description="Single signature P2WPKH"):
         keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**"],
         description=description
     )
-    bulk_check(erpc, descriptors, collector, mode)
+    bulk_check(enode, descriptors, collector, mode)
 
 @pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
-def test_sh_wpkh(erpc, collector, mode):
+def test_sh_wpkh(enode, collector, mode):
     derivation = "49h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
     xpub = xprv.to_public()
@@ -523,10 +549,10 @@ def test_sh_wpkh(erpc, collector, mode):
         keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**"],
         description="Single signature P2SH-P2WPKH"
     )
-    bulk_check(erpc, descriptors, collector, mode)
+    bulk_check(enode, descriptors, collector, mode)
 
 @pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
-def test_pkh(erpc, collector, mode):
+def test_pkh(enode, collector, mode):
     derivation = "44h/1h/0h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
     xpub = xprv.to_public()
@@ -536,10 +562,10 @@ def test_pkh(erpc, collector, mode):
         f"pkh([{FGP}/{derivation}]{xprv}/1/*)"
     )
     collector.skip_suite() # Legacy transactions are not currently supported
-    bulk_check(erpc, descriptors, collector, mode)
+    bulk_check(enode, descriptors, collector, mode)
 
 @pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
-def test_wsh(erpc, collector, mode):
+def test_wsh(enode, collector, mode):
     # 1-of-2 multisig
     derivation = "48h/1h/0h/2h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
@@ -561,10 +587,10 @@ def test_wsh(erpc, collector, mode):
         ],
         description="Multiple signature 1-of-2 P2WSH"
     )
-    bulk_check(erpc, descriptors, collector, mode)
+    bulk_check(enode, descriptors, collector, mode)
 
 @pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
-def test_sh_wsh(erpc, collector, mode):
+def test_sh_wsh(enode, collector, mode):
     # 1-of-2 multisig
     derivation = "48h/1h/0h/1h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
@@ -586,10 +612,10 @@ def test_sh_wsh(erpc, collector, mode):
         ],
         description="Multiple signature 1-of-2 P2SH-P2WSH"
     )
-    bulk_check(erpc, descriptors, collector, mode)
+    bulk_check(enode, descriptors, collector, mode)
 
 @pytest.mark.parametrize("mode", ['sighashes', 'blinded_unblinded', 'asset'])
-def test_sh(erpc, collector, mode):
+def test_sh(enode, collector, mode):
     # 1-of-2 multisig
     derivation = "45h"
     xprv = ROOTKEY.derive(f"m/{derivation}")
@@ -601,23 +627,23 @@ def test_sh(erpc, collector, mode):
         f"sh(sortedmulti(1,[12345678/{derivation}]{cosigner}/1/*,[{FGP}/{derivation}]{xprv}/1/*))"
     )
     collector.skip_suite() # Legacy transactions are not currently supported
-    bulk_check(erpc, descriptors, collector, mode)
+    bulk_check(enode, descriptors, collector, mode)
 
 
 # Execute only if started as 'pytest --target=unknown_asset'
 @pytest.mark.target("unknown_asset")
 @pytest.mark.parametrize("mode", ['unknown_asset'])
-def test_wpkh_unknown_asset(erpc, collector, mode):
-    test_wpkh(erpc, collector, mode, description="Unknown asset: single signature P2WPKH")
+def test_wpkh_unknown_asset(enode, collector, mode):
+    test_wpkh(enode, collector, mode, description="Unknown asset: single signature P2WPKH")
 
 # Execute only if started as 'pytest --target=asset_metadata'
 @pytest.mark.target("asset_metadata")
 @pytest.mark.parametrize("mode", ['asset_metadata'])
-def test_wpkh_asset_metadata(erpc, collector, mode):
-    test_wpkh(erpc, collector, mode, description="Asset metatada: single signature P2WPKH")
+def test_wpkh_asset_metadata(enode, collector, mode):
+    test_wpkh(enode, collector, mode, description="Asset metatada: single signature P2WPKH")
 
 # Execute only if started as 'pytest --target=asset_metadata_no_ticker'
 @pytest.mark.target("asset_metadata_no_ticker")
 @pytest.mark.parametrize("mode", ['asset_metadata_no_ticker'])
-def test_wpkh_asset_metadata_no_ticker(erpc, collector, mode):
-    test_wpkh(erpc, collector, mode, description="Asset metatada, no ticker: single signature P2WPKH")
+def test_wpkh_asset_metadata_no_ticker(enode, collector, mode):
+    test_wpkh(enode, collector, mode, description="Asset metatada, no ticker: single signature P2WPKH")

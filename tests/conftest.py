@@ -8,6 +8,7 @@ import os
 import json
 from collections import OrderedDict
 from util.rpc import BitcoinRPC
+from test_debug import *
 
 DATADIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "blockchain")
 RPCUSER = "liquid"
@@ -17,12 +18,11 @@ PORT = 18999
 ELEMENTSD = os.environ.get("ELEMENTSD_CMD", default="elementsd")
 CMD = f"{ELEMENTSD} -daemon=1 -datadir={DATADIR} -chain=liquidregtest \
         -rpcuser={RPCUSER} -rpcpassword={RPCPASSWORD} -rpcport={RPCPORT} -port={PORT} \
-        -fallbackfee=0.0000001 -validatepegin=0 -initialfreecoins=2100000000000000"
+        -fallbackfee=0.0000001 -validatepegin=0 -initialfreecoins=2100000000000000 -blindedaddresses=1"
 PROCESS_NAME="elementsd"
 TEST_DATA_FILE = os.environ.get("TEST_DATA_FILE", default="test_data.json")
 WAIT_DEBUGGER = os.environ.get("WAIT_DEBUGGER", default="0")
 START_NODE = True if int(os.environ.get("START_NODE", default="1")) > 0 else False
-
 
 def pytest_configure(config):
     # register your new marker to avoid warnings
@@ -70,7 +70,7 @@ def get_coins(rpc):
     w.rescanblockchain()
     w.mine(10)
     balance = w.getbalance()
-    addr = w.getnewaddress()
+    addr = w.getaddressinfo(w.getnewaddress())["confidential"]
     # send half to our own address to make them confidential
     w.sendtoaddress(addr, balance["bitcoin"]//2)
     w.mine(1)
@@ -152,33 +152,64 @@ def stop_node(rpc, pid: int):
         except Exception as e:
             time.sleep(1)
 
-@pytest.fixture(scope="function", autouse=True)
-def erpc():
-    """Starts elementsd and gives back rpc instance to work with"""
+class ElementsNode(object):
+    """Manages Elements node"""
+    def __init__(self) -> None:
+        self._daemon_pid = -1
+        self._rpc = None
+        self._is_running = False
 
-    daemon_pid = -1
-    if START_NODE:
-        daemon_pid = start_node()
-    else:
-        if not check_node_running():
-            print("Please start node first with following command line:")
-            print(CMD)
-            raise RuntimeError()
+    @property
+    def rpc(self) -> BitcoinRPC:
+        return self._rpc if self._is_running else None
+
+    def start(self) -> None:
+        if not self._is_running:
+            debug_print("starting node...", end="")
+            if START_NODE:
+                self._daemon_pid = start_node()
+            else:
+                if not check_node_running():
+                    print("Please start node first with following command line:")
+                    print(CMD)
+                    raise RuntimeError()
+
+            self._rpc = BitcoinRPC(user=RPCUSER, password=RPCPASSWORD, port=RPCPORT)
+            for _ in range(100):
+                try: # checking if elements is loaded already
+                    self._rpc.getblockchaininfo()
+                    break
+                except:
+                    time.sleep(0.2)
+            get_coins(self._rpc)
+            self._is_running = True
+            debug_print("done")
+
+    def stop(self) -> None:
+        if self._is_running:
+            debug_print("stopping node...", end="")
+            if START_NODE and self._daemon_pid != -1:
+                stop_node(self._rpc, self._daemon_pid)
+                self._daemon_pid = -1
+            self._is_running = False
+            debug_print("done")
+
+    def restart(self):
+        self.stop()
+        self.start()
+
+@pytest.fixture(scope="function", autouse=True)
+def enode():
+    """Starts elementsd and gives back node management object to work with"""
+
+    node = ElementsNode()
 
     try:
-        rpc = BitcoinRPC(user=RPCUSER, password=RPCPASSWORD, port=RPCPORT)
-        for i in range(100):
-            try: # checking if elements is loaded already
-                rpc.getblockchaininfo()
-                break
-            except:
-                time.sleep(0.2)
-        get_coins(rpc)
-        yield rpc
+        node.start()
+        yield node
     finally:
-        # stop elementsd
-        if START_NODE:
-            stop_node(rpc, daemon_pid)
+        node.stop()
+
 
 class TestDataCollector(object):
     """Collects test tata and dumps it to JSON file"""
