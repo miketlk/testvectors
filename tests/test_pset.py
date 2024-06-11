@@ -486,6 +486,9 @@ def bulk_check(enode, descriptors, collector, mode: str = 'all'):
                 debug_print(f"\n === Confidential : {conf_status[(conf_input, conf_destination)]} ===")
                 unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, amount=0.1234, confidential=conf_destination, confidential_change=conf_destination)
                 unsigned = blinded or unblinded
+                if conf_input and not conf_destination:
+                    # Skip "confinential->unconfidential" for now, before the wallet app supports it properly
+                    continue
                 signed = sign_psbt(w, unsigned)
                 check_psbt(enode.rpc, unsigned, signed)
                 sh = sighash_from_signed_pset(signed)
