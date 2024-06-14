@@ -13,7 +13,7 @@ import hashlib
 import json
 import requests
 import math
-from test_debug import *
+from util.debug import *
 
 # PSET key for asset metadata
 PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA = b'\xfc\x08pset_hww\x00'

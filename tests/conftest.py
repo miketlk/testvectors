@@ -8,7 +8,7 @@ import os
 import json
 from collections import OrderedDict
 from util.rpc import BitcoinRPC
-from test_debug import *
+from util.debug import *
 
 DATADIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "blockchain")
 RPCUSER = "liquid"
