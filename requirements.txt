@@ -1,0 +1,5 @@
+embit
+pytest
+psutil
+requests
+pyparsing

@@ -9,6 +9,10 @@ import json
 from collections import OrderedDict
 from util.rpc import BitcoinRPC
 from util.debug import *
+from lwk import TestEnv, ElectrumClient
+
+# Let pytest know that it's not one of his test classes
+TestEnv.__test__ = False
 
 DATADIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "blockchain")
 RPCUSER = "liquid"
@@ -165,7 +169,7 @@ class ElementsNode(object):
 
     def start(self) -> None:
         if not self._is_running:
-            debug_print("starting node...", end="")
+            debug_print("\nstarting node...", end="")
             if START_NODE:
                 self._daemon_pid = start_node()
             else:
@@ -187,7 +191,7 @@ class ElementsNode(object):
 
     def stop(self) -> None:
         if self._is_running:
-            debug_print("stopping node...", end="")
+            debug_print("\nstopping node...", end="")
             if START_NODE and self._daemon_pid != -1:
                 stop_node(self._rpc, self._daemon_pid)
                 self._daemon_pid = -1
@@ -198,7 +202,7 @@ class ElementsNode(object):
         self.stop()
         self.start()
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(scope="function")
 def enode():
     """Starts elementsd and gives back node management object to work with"""
 
@@ -210,6 +214,20 @@ def enode():
     finally:
         node.stop()
 
+@pytest.fixture(scope="function")
+def lwknode():
+    """Launches launch electrs and elementsd and returns instance of lwk.TestEnv"""
+    try:
+        debug_print("\nstarting LWK node...", end="")
+        node = TestEnv() # Launch electrs and elementsd
+        node.electrum_client = ElectrumClient(node.electrum_url(), tls=False, validate_domain=False)
+        debug_print("done")
+        yield node
+    finally:
+        debug_print("\nstopping LWK node...", end="")
+        del node.electrum_client
+        del node
+        debug_print("done")
 
 class TestDataCollector(object):
     """Collects test tata and dumps it to JSON file"""

@@ -345,6 +345,9 @@ def get_signatures(signed_pset: str) -> dict:
 
     return sigs
 
+def get_fee(signed_pset: str) -> dict:
+    return PSET.from_string(signed_pset).fee()
+
 def get_asset_name(asset: str, metadata_list: list = []) -> str:
     for meta in metadata_list:
         if meta['tag'] == asset:
