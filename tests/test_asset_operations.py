@@ -3,7 +3,7 @@ from typing import OrderedDict
 from pyparsing import *
 from lwk import *
 from util.debug import *
-from test_pset import sighash_from_signed_pset, get_signatures, sighash_to_str, get_fee, MNEMONIC
+from test_pset import sighash_from_signed_pset, get_signatures, add_asset_metadata, get_fee, get_asset_issuance_outpoint, MNEMONIC
 
 def parse_wpkh_slip77_descriptor(desc):
     """
@@ -70,9 +70,18 @@ def test_asset_operations(lwknode, collector):
     assert(wollet.balance()[asset_id] == issued_asset)
     assert(wollet.balance()[token_id] == reissuance_tokens)
 
+    # Add asset metadata to unsigned PSET
+    asset_info = {
+        'asset_tag': str(asset_id),
+        'contract': str(contract),
+        'token_tag': str(token_id)
+    }
+    asset_info.update(get_asset_issuance_outpoint(str(finalized_pset)))
+    vector_pset = add_asset_metadata(str(unsigned_pset), [asset_info])
+
     destination_address0 = wollet.address(0).address()
     collector.add_test(
-        pset=str(unsigned_pset),
+        pset=vector_pset,
         signatures=get_signatures(str(finalized_pset)),
         sighash=sighash_from_signed_pset(str(finalized_pset)),
         description=f"Asset issue",
@@ -100,10 +109,12 @@ def test_asset_operations(lwknode, collector):
 
     assert(wollet.balance()[asset_id] == issued_asset + reissue_asset)
 
-    destination_address1 = wollet.address(1).address()
+    # Add asset metadata to unsigned PSET
+    vector_pset = add_asset_metadata(str(unsigned_pset), [asset_info])
 
+    destination_address1 = wollet.address(1).address()
     collector.add_test(
-        pset=str(unsigned_pset),
+        pset=vector_pset,
         signatures=get_signatures(str(finalized_pset)),
         sighash=sighash_from_signed_pset(str(finalized_pset)),
         description=f"Asset reissue",
@@ -131,8 +142,11 @@ def test_asset_operations(lwknode, collector):
 
     assert(wollet.balance()[asset_id] == issued_asset + reissue_asset - burn_asset)
 
+    # Add asset metadata to unsigned PSET
+    vector_pset = add_asset_metadata(str(unsigned_pset), [asset_info])
+
     collector.add_test(
-        pset=str(unsigned_pset),
+        pset=vector_pset,
         signatures=get_signatures(str(finalized_pset)),
         sighash=sighash_from_signed_pset(str(finalized_pset)),
         description=f"Asset burn",

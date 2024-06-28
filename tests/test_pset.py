@@ -17,6 +17,10 @@ from util.debug import *
 
 # PSET key for asset metadata
 PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA = b'\xfc\x08pset_hww\x00'
+# PSET key for reissuance token definition
+PSBT_ELEMENTS_HWW_GLOBAL_REISSUANCE_TOKEN = b'\xfc\x08pset_hww\x01'
+# PSET key for the blinded issuance flag
+PSBT_ELEMENTS_IN_BLINDED_ISSUANCE = b'\xfc\x04pset\x15'
 
 # liquid regtest can have any name except main, test, regtest, liquidv1 and liquidtestnet
 NET = get_network("liquidregtest")
@@ -239,11 +243,18 @@ def issue(erpc, w, name, asset_amount, domain, ticker=None, precision=0, token_a
     assert assetid in w.getbalance()
 
     asset = {
-        'tag': assetid,
+        'asset_tag': assetid,
         'contract': contract,
         'prevout_txid': utxo["txid"],
-        'prevout_index': utxo["vout"]
+        'prevout_index': utxo["vout"],
+        'blind': blind
     }
+
+    if token_amount != 0:
+        tokenid = rawissue["token"]
+        assert tokenid in w.getbalance()
+        asset['token_tag'] = tokenid
+
     return asset
 
 def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None, asset=None):
@@ -345,12 +356,31 @@ def get_signatures(signed_pset: str) -> dict:
 
     return sigs
 
+def get_asset_issuance_outpoint(pset: str) -> dict:
+    psbt = PSET.from_string(pset)
+    for inp in psbt.inputs:
+        if inp.has_issuance:
+            if hasattr(inp, 'blinded_issuance'):
+                blinded = inp.blinded_issuance
+            elif PSBT_ELEMENTS_IN_BLINDED_ISSUANCE in inp.unknown:
+                blinded = bool.from_bytes(inp.unknown[PSBT_ELEMENTS_IN_BLINDED_ISSUANCE])
+            else:
+                blinded = False
+
+            return {
+                'prevout_txid': inp.txid.hex(),
+                'prevout_index': inp.vout,
+                'blinded': blinded
+            }
+
+    return {}
+
 def get_fee(signed_pset: str) -> dict:
     return PSET.from_string(signed_pset).fee()
 
 def get_asset_name(asset: str, metadata_list: list = []) -> str:
     for meta in metadata_list:
-        if meta['tag'] == asset:
+        if meta['asset_tag'] == asset:
             contract_obj = json.loads(meta['contract'])
             return "'" + contract_obj['name'] + "' (" + asset[:8] + "...)"
 
@@ -360,14 +390,19 @@ def add_asset_metadata(pset_str: str, metadata_list: list) -> str:
     pset = PSET.from_string(pset_str)
 
     for meta in metadata_list:
+        asset_tag_bytes = bytes.fromhex(meta['asset_tag'])[::-1]
         coded_meta = (
             compact.to_bytes(len(meta['contract'])) +
             meta['contract'].encode() +
             bytes.fromhex(meta['prevout_txid'])[::-1] +
             int(meta['prevout_index']).to_bytes(4,'little')
         )
-        key = PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA + bytes.fromhex(meta['tag'])[::-1]
+        key = PSBT_ELEMENTS_HWW_GLOBAL_ASSET_METADATA + asset_tag_bytes
         pset.unknown[key] = coded_meta
+
+        if 'token_tag' in meta:
+            key = PSBT_ELEMENTS_HWW_GLOBAL_REISSUANCE_TOKEN + bytes.fromhex(meta['token_tag'])[::-1]
+            pset.unknown[key] = bytes([1 if meta['blinded'] else 0]) + asset_tag_bytes
 
     return pset.to_string()
 
@@ -416,9 +451,9 @@ def bulk_check(enode, descriptors, collector, mode: str = 'all'):
             )]
         else:
             issued_list = issue_test_assets(enode.rpc, w)
-        issued_dict = { a['tag'] : a for a in issued_list }
+        issued_dict = { a['asset_tag'] : a for a in issued_list }
         # iterate over issued assets
-        assets = [a['tag'] for a in issued_list]
+        assets = [a['asset_tag'] for a in issued_list]
         for asset in assets:
             unblinded, blinded, tx_prop = create_psbt(enode.rpc, w, amount=0.12345678, asset=asset)
             unsigned = blinded or unblinded
