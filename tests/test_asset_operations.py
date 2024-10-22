@@ -5,16 +5,22 @@ from lwk import *
 from util.debug import *
 from test_pset import sighash_from_signed_pset, get_signatures, add_asset_metadata, get_fee, get_asset_issuance_outpoint, MNEMONIC
 
+
 def parse_wpkh_slip77_descriptor(desc):
     """
     Parses descriptor with a format similar to:
     `ct(slip77(0c1164...b4),elwpkh([f5acc2fd/84'/1'/0']tpubDCtK...1P/<0;1>/*))#u6k3x4g3`
     """
     desc = str(desc)
-    mbk = Combine(Word('slip77(') + Word(nums + hexnums) + ')')
-    pubkey = Word(alphanums + "'[]/<;>*")
+    mbk = Combine(Literal('slip77(') + Word(nums + hexnums) + Literal(')'))
+    pubkey_path = Word(hexnums + "'/")
+    pubkey_body = Word(alphanums)
+    pubkey_wildcard = Word(nums + "/<;>*")
+    pubkey = Combine( '[' + pubkey_path("path") + ']' + pubkey_body("body") + pubkey_wildcard("wildcard") )
     desc_schema = Word('ct(') + mbk("mbk") + ',elwpkh(' + pubkey("pubkey") + rest_of_line
-    return desc_schema.search_string(desc)[0].asDict()
+    desc_parsed = desc_schema.search_string(desc)[0].asDict()
+    return desc_parsed
+
 
 # Execute only if started as 'pytest --target=asset_operations'
 @pytest.mark.target("asset_operations")
@@ -28,12 +34,13 @@ def test_asset_operations(lwknode, collector):
     desc = signer.wpkh_slip77_descriptor()
     desc_parsed = parse_wpkh_slip77_descriptor(desc)
 
+    pubkey = desc_parsed['pubkey']
     collector.define_suite(
         kind="valid",
         name="wpkh",
         mbk=desc_parsed['mbk'],
-        policy_map="wpkh(@0)",
-        keys_info=[desc_parsed['pubkey']],
+        policy_map=f"wpkh(@0{pubkey['wildcard']})",
+        keys_info=[ f"[{pubkey['path']}]{pubkey['body']}" ],
         description="Asset operations"
     )
 

@@ -563,8 +563,8 @@ def test_wpkh(enode, collector, mode, description="Single signature P2WPKH"):
         kind="valid",
         name="wpkh",
         mbk=MBK_SLIP77,
-        policy_map="wpkh(@0)",
-        keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**"],
+        policy_map="wpkh(@0/**)",
+        keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}"],
         description=description
     )
     bulk_check(enode, descriptors, collector, mode)
@@ -583,8 +583,8 @@ def test_sh_wpkh(enode, collector, mode):
         kind="valid",
         name="sh_wpkh",
         mbk=MBK_SLIP77,
-        policy_map="sh(wpkh(@0))",
-        keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**"],
+        policy_map="sh(wpkh(@0/**))",
+        keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}"],
         description="Single signature P2SH-P2WPKH"
     )
     bulk_check(enode, descriptors, collector, mode)
@@ -618,10 +618,10 @@ def test_wsh(enode, collector, mode):
         kind="valid",
         name="wsh_sortedmulti",
         mbk=MBK_SLIP77,
-        policy_map="wsh(sortedmulti(1,@0,@1))",
+        policy_map="wsh(sortedmulti(1,@0/**,@1/**))",
         keys_info=[
-            f"[12345678/{derivation_quote(derivation)}]{cosigner}/**",
-            f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**",
+            f"[12345678/{derivation_quote(derivation)}]{cosigner}",
+            f"[{FGP}/{derivation_quote(derivation)}]{xpub}",
         ],
         description="Multiple signature 1-of-2 P2WSH"
     )
@@ -643,10 +643,10 @@ def test_sh_wsh(enode, collector, mode):
         kind="valid",
         name="sh_wsh_sortedmulti",
         mbk=MBK_SLIP77,
-        policy_map="sh(wsh(sortedmulti(1,@0,@1)))",
+        policy_map="sh(wsh(sortedmulti(1,@0/**,@1/**)))",
         keys_info=[
-            f"[12345678/{derivation_quote(derivation)}]{cosigner}/**",
-            f"[{FGP}/{derivation_quote(derivation)}]{xpub}/**",
+            f"[12345678/{derivation_quote(derivation)}]{cosigner}",
+            f"[{FGP}/{derivation_quote(derivation)}]{xpub}",
         ],
         description="Multiple signature 1-of-2 P2SH-P2WSH"
     )
