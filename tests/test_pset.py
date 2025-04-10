@@ -156,11 +156,12 @@ def fund_wallet(erpc, w, amount=1, confidential=True, asset_amount=0, source=Non
     # send asset
     if asset_amount > 0:
         assetid = get_assetid(source)
-        source.sendtoaddress(addr, asset_amount, "", "", False, False, 6, "unset", False, assetid)
+        txid = source.sendtoaddress(addr, asset_amount, "", "", False, False, 6, "unset", False, assetid)
     # send bitcoin
     if amount > 0:
-        source.sendtoaddress(addr, amount)
+        txid = source.sendtoaddress(addr, amount)
     source.mine(1)
+    return txid
 
 def fund_wallet_with_free_coins(w, amount=1, confidential=True):
     """
@@ -174,15 +175,28 @@ def fund_wallet_with_free_coins(w, amount=1, confidential=True):
 
     debug_print(f"fund_wallet_with_free_coins(confidential={confidential})\n  recipient: {addr}")
 
-    w.sendtoaddress(addr, amount)
+    txid = w.sendtoaddress(addr, amount)
     w.mine(1)
     assert w.getbalance().get("bitcoin", 0) >= amount
+    return txid
 
 def inject_sighash(psbt, sighash):
     psbt = PSET.from_string(psbt)
-    for inp in psbt.inputs:
-        inp.sighash_type = sighash
+    for i, inp in enumerate(psbt.inputs):
+        if type(sighash) in [list, tuple]:
+            inp.sighash_type = sighash[i]
+        else:
+            inp.sighash_type = sighash
     return str(psbt)
+
+def get_utxos_sorted(w, asset_label="bitcoin"):
+    asset_id = w.dumpassetlabels()[asset_label]
+    utxos = [utxo for utxo in w.listunspent(1, 9999999, [], True, {"asset": asset_id})]
+    if not utxos:
+        raise RuntimeError(f"Not enough funds. Send some {asset_label} to {w.getnewaddress()}.")
+
+    utxos.sort(key=lambda utxo: -utxo["amount"])
+    return utxos
 
 def issue(erpc, w, name, asset_amount, domain, ticker=None, precision=0, token_amount=0, asset_address=None, token_address=None, pubkey=None, collection="", blind=True):
     asset_address = asset_address or w.getnewaddress()
@@ -257,7 +271,7 @@ def issue(erpc, w, name, asset_amount, domain, ticker=None, precision=0, token_a
 
     return asset
 
-def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None, asset=None):
+def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confidential_change=True, sighash=None, asset=None, inputs=[], aux_outputs=[]):
     if not destination:
         wdefault = erpc.wallet()
         destination = wdefault.getnewaddress()
@@ -269,7 +283,7 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
 
     debug_print(f"create_psbt(confidential={confidential}, confidential_change={confidential_change}):\n  recipient: {destination}\n  change:    {change}")
 
-    outputs = [{destination: amount}]
+    outputs = [{destination: amount}] + aux_outputs
     options = {
         "includeWatching": True,
         "changeAddress": change,
@@ -283,7 +297,7 @@ def create_psbt(erpc, w, amount=0.1, destination=None, confidential=True, confid
         # so here we will always have confidential change unless we patch psbt afterwards
         options.pop("changeAddress")
         options["change_type"] = w.addr_type
-    psbt = w.walletcreatefundedpsbt([], outputs, 0, options, True)
+    psbt = w.walletcreatefundedpsbt(inputs, outputs, 0, options, True)
     unblinded = psbt["psbt"]
     try:
         blinded = w.walletprocesspsbt(unblinded, False)['psbt']
@@ -309,8 +323,11 @@ def check_psbt(erpc, unsigned, signed, sighash=None):
     if sighash:
         psbt = PSET.from_string(signed)
         for inp in psbt.inputs:
-            for sig in inp.partial_sigs.values():
-                assert sig[-1] == sighash
+            for i, sig in enumerate(inp.partial_sigs.values()):
+                if type(sighash) in [list, tuple]:
+                    assert sig[-1] == sighash[i]
+                else:
+                    assert sig[-1] == sighash
     combined = erpc.combinepsbt([unsigned, signed])
     final = erpc.finalizepsbt(combined)
     if final["complete"]:
@@ -321,6 +338,12 @@ def check_psbt(erpc, unsigned, signed, sighash=None):
         raw = str(tx)
     # test accept
     assert erpc.testmempoolaccept([raw])[0]["allowed"]
+    return raw
+
+def mine_psbt(erpc, w, unsigned, signed, sighash=None):
+    finalized = check_psbt(erpc, unsigned, signed, sighash)
+    erpc.sendrawtransaction(finalized)
+    w.mine(1)
 
 def sighash_from_signed_pset(signed: str) -> int:
     sighash = -1
@@ -542,6 +565,48 @@ def bulk_check(enode, descriptors, collector, mode: str = 'all'):
                         True
                     )
 
+def check_sighashes_multi_input(enode, descriptors, collector):
+    w = create_wallet(enode.rpc, *descriptors)
+
+    k = 0.4578 * len(ALL_SIGHASHES)
+    amount = round(0.12345678, 8)
+    out_amount = []
+    for sh in ALL_SIGHASHES:
+        fund_wallet(enode.rpc, w, round(amount+0.001, 8), confidential=True)
+        out_amount.append(amount)
+        amount = round(amount * k, 8)
+
+    utxos = get_utxos_sorted(w)[0:len(ALL_SIGHASHES)]
+    amounts = [utxo["amount"] for utxo in utxos]
+    total = sum(amounts)
+
+    out_address = [w.getnewaddress() for _ in range(len(ALL_SIGHASHES))]
+    unblinded, blinded, tx_prop = create_psbt(
+        enode.rpc,
+        w,
+        amount=out_amount[0],
+        destination=out_address[0],
+        sighash=ALL_SIGHASHES,
+        inputs=[{"txid": utxo["txid"], "vout": utxo["vout"]} for utxo in utxos],
+        aux_outputs=[{out_address[i]: out_amount[i]} for i in range(1, len(ALL_SIGHASHES))]
+    )
+    unsigned = blinded or unblinded
+
+    tx_prop["amount"] = out_amount
+    tx_prop["destination_address"] = [
+        OrderedDict({
+            "confidential": info["confidential"],
+            "unconfidential": info["unconfidential"]
+        }) for info in [w.getaddressinfo(addr) for addr in out_address]]
+
+    collector.add_test(
+        pset=unsigned,
+        signatures={},
+        sighash=[sighash_to_str(sh) for sh in ALL_SIGHASHES],
+        description=f"Transaction with {len(ALL_SIGHASHES)} inputs, {len(ALL_SIGHASHES)} outupts and different sighashes",
+        **tx_prop
+    )
+
 def derivation_quote(path: str) -> str:
     return path.replace("h", "'")
 
@@ -685,3 +750,24 @@ def test_wpkh_asset_metadata(enode, collector, mode):
 @pytest.mark.parametrize("mode", ['asset_metadata_no_ticker'])
 def test_wpkh_asset_metadata_no_ticker(enode, collector, mode):
     test_wpkh(enode, collector, mode, description="Asset metatada, no ticker: single signature P2WPKH")
+
+@pytest.mark.target("sighashes_multi_input")
+def test_sighashes_multi_input(enode, collector):
+    derivation = "84h/1h/0h"
+    xprv = ROOTKEY.derive(f"m/{derivation}")
+    xpub = xprv.to_public()
+    # change and receive descriptors
+    descriptors = (
+        f"wpkh([{FGP}/{derivation}]{xprv}/0/*)",
+        f"wpkh([{FGP}/{derivation}]{xprv}/1/*)"
+    )
+
+    collector.define_suite(
+        kind="valid",
+        name="wpkh",
+        mbk=MBK_SLIP77,
+        policy_map="wpkh(@0/**)",
+        keys_info=[f"[{FGP}/{derivation_quote(derivation)}]{xpub}"],
+        description="Multi-input transaction with various sighash flags"
+    )
+    check_sighashes_multi_input(enode, descriptors, collector)

@@ -20,3 +20,4 @@ unknown_asset.json
 asset_metadata.json
 asset_metadata_no_ticker.json
 asset_operations.json
+sighashes_multi_input.json
